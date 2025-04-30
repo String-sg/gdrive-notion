@@ -1,6 +1,6 @@
 // /pages/api/sync-drive.js
-import { google } from 'googleapis';
-import { Client as NotionClient } from '@notionhq/client';
+import { notion } from '@/lib/notion'
+import { drive } from '@/lib/drive'
 
 const notion = new NotionClient({ auth: process.env.NOTION_API_KEY });
 const folderId = process.env.GOOGLE_FOLDER_ID;
