@@ -1,0 +1,336 @@
+// === MAIN SYNC FUNCTION ===
+function syncAllFolderTags() {
+  Logger.log('Starting sync...');
+  const accessToken = getAccessToken();
+
+  // Create a new sync container page
+  const timestamp = new Date().toLocaleString('en-SG', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  const syncPageTitle = `Sync for Google Drive: Acai (Teachers’ Professional Development) as of - ${timestamp}`;
+
+  CURRENT_SYNC_PAGE_ID = createSyncRootPage(syncPageTitle);
+  Logger.log(`Created sync page: ${CURRENT_SYNC_PAGE_ID}`);
+
+  // List folders and files
+  const allFolders = {};
+  const allFiles = {};
+  Logger.log('Listing folders and files...');
+  listFoldersAndFilesRecursively(SHARED_DRIVE_ID, null, accessToken, allFolders, allFiles);
+
+  const folderToNotionPageId = {};
+  const folderToDatabaseId = {};
+
+  const rootFolders = Object.keys(allFolders).filter(fid => allFolders[fid].parent === null);
+  const folderQueue = [].concat(rootFolders);
+
+  while (folderQueue.length > 0) {
+    const folderId = folderQueue.shift();
+    const folder = allFolders[folderId];
+    const parentNotionPageId = folder.parent ? folderToNotionPageId[folder.parent] : CURRENT_SYNC_PAGE_ID;
+
+    const notionPageId = createNotionPage(folder.name, parentNotionPageId);
+    folderToNotionPageId[folderId] = notionPageId;
+
+    const databaseId = createNotionDatabase(folder.name, notionPageId);
+    folderToDatabaseId[folderId] = databaseId;
+
+    (folder.children || []).forEach(subfolderId => folderQueue.push(subfolderId));
+  }
+
+  Object.keys(allFolders).forEach(folderId => {
+    const databaseId = folderToDatabaseId[folderId];
+    if (!databaseId) return;
+    const filesInFolder = allFiles[folderId] || [];
+    syncFilesToNotionDatabase(filesInFolder, databaseId);
+  });
+
+  Logger.log("Sync complete!");
+}
+
+// === CREATE SYNC CONTAINER PAGE ===
+function createSyncRootPage(title) {
+  let payload = {
+    parent: { type: "page_id", page_id: NOTION_PARENT_PAGE_ID },
+    properties: {
+      title: {
+        title: [{ type: "text", text: { content: title } }]
+      }
+    },
+    icon: { type: "emoji", emoji: "🔄" },
+    children: [
+      {
+        object: "block",
+        type: "heading_2",
+        heading_2: {
+          rich_text: [{
+            type: "text",
+            text: { content: `🕒 Sync started at ${new Date().toLocaleString()}` }
+          }]
+        }
+      }
+    ]
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + NOTION_TOKENER,
+      "Notion-Version": "2022-06-28"
+    },
+    payload: JSON.stringify(payload)
+  };
+
+  const response = UrlFetchApp.fetch("https://api.notion.com/v1/pages", options);
+  const data = JSON.parse(response.getContentText());
+  return data.id;
+}
+
+// === CREATE NOTION PAGE ===
+function createNotionPage(pageName, parentPageId) {
+  const payload = {
+    parent: { type: "page_id", page_id: parentPageId },
+    properties: {
+      title: {
+        title: [{ type: "text", text: { content: pageName } }]
+      }
+    },
+    icon: { type: "emoji", emoji: "📁" }
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + NOTION_TOKENER,
+      "Notion-Version": "2022-06-28"
+    },
+    payload: JSON.stringify(payload)
+  };
+
+  const response = UrlFetchApp.fetch("https://api.notion.com/v1/pages", options);
+  const data = JSON.parse(response.getContentText());
+  return data.id;
+}
+
+// === CREATE NOTION DATABASE ===
+function createNotionDatabase(folderName, parentPageId) {
+  const dbName = folderName + " Files";
+
+  const payload = {
+    parent: { type: "page_id", page_id: parentPageId },
+    title: [{ type: "text", text: { content: dbName } }],
+    properties: {
+      "Name": { title: {} },
+      "Tags": { multi_select: {} },
+      "Created": { date: {} },
+      "Updated": { date: {} },
+      "Owner": { people: {} },
+      "Type": { rich_text: {} },
+      "Preview": { rich_text: {} },
+      "File Link": { url: {} } // Add a new property for file link
+    }
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + NOTION_TOKENER,
+      "Notion-Version": "2022-06-28"
+    },
+    payload: JSON.stringify(payload)
+  };
+
+  const response = UrlFetchApp.fetch("https://api.notion.com/v1/databases", options);
+  const data = JSON.parse(response.getContentText());
+  return data.id;
+}
+
+// === SYNC FILES TO NOTION DATABASE ===
+function syncFilesToNotionDatabase(files, databaseId) {
+  const notionEntries = listNotionDatabaseEntries(databaseId);
+  const notionMap = {};
+  notionEntries.forEach(entry => {
+    const nameProp = entry.properties.Name;
+    if (nameProp && nameProp.title && nameProp.title[0]) {
+      notionMap[nameProp.title[0].plain_text] = entry.id;
+    }
+  });
+
+  files.forEach(file => {
+    const fileName = file.name;
+    const notionPageId = notionMap[fileName];
+    const ownerName = (file.owners && file.owners.length > 0) ? file.owners[0].displayName : '';
+    const tags = generateTagsFromFile(file);
+    const preview = generatePreviewFromFile(file);
+    const fileLink = `https://drive.google.com/file/d/${file.id}/view`; // Generate file link
+
+    const props = {
+      "Name": fileName,
+      "Tags": tags,
+      "Owner": ownerName,
+      "Created": file.createdTime,
+      "Updated": file.modifiedTime,
+      "Type": file.mimeType,
+      "Preview": preview,
+      "File Link": fileLink // Include the file link here
+    };
+
+    if (notionPageId) {
+      updateNotionPage(notionPageId, props);
+    } else {
+      createNotionPageInDatabase(databaseId, props);
+    }
+  });
+}
+
+// === CREATE PAGE IN NOTION DATABASE ===
+function createNotionPageInDatabase(databaseId, props) {
+  const payload = {
+    parent: { database_id: databaseId },
+    properties: notionPropertiesFromFileProps(props)
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + NOTION_TOKENER,
+      "Notion-Version": "2022-06-28"
+    },
+    payload: JSON.stringify(payload)
+  };
+
+  UrlFetchApp.fetch("https://api.notion.com/v1/pages", options);
+}
+
+// === UPDATE NOTION PAGE ===
+function updateNotionPage(pageId, props) {
+  const payload = {
+    properties: notionPropertiesFromFileProps(props)
+  };
+
+  const options = {
+    method: "patch",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + NOTION_TOKENER,
+      "Notion-Version": "2022-06-28"
+    },
+    payload: JSON.stringify(payload)
+  };
+
+  UrlFetchApp.fetch(`https://api.notion.com/v1/pages/${pageId}`, options);
+}
+
+// === PROPERTY MAPPING ===
+function notionPropertiesFromFileProps(props) {
+  return {
+    "Name": { title: [{ type: "text", text: { content: props.Name } }] },
+    "Tags": { multi_select: props.Tags.map(tag => ({ name: tag })) },
+    "Owner": { people: props.Owner ? [props.Owner] : [] },
+    "Created": { date: { start: props.Created } },
+    "Updated": { date: { start: props.Updated } },
+    "Type": { rich_text: [{ type: "text", text: { content: props["Type"] } }] },
+    "Preview": { rich_text: [{ type: "text", text: { content: props.Preview } }] },
+    "File Link": { url: props["File Link"] } // Added property for file link
+  };
+}
+
+// === FILE TAGGING BASED ON DYNAMIC INPUT ===
+function generateTagsFromFile(file) {
+  const tags = new Set();
+
+  // Use folder path (if exists)
+  if (file._folderPath && Array.isArray(file._folderPath)) {
+    file._folderPath.forEach(part => tags.add(part.toLowerCase()));
+  }
+
+  // Use name tokens
+  const nameTokens = file.name.split(/[\s\-\_\.]+/);
+  nameTokens.forEach(token => {
+    if (token.length > 1) tags.add(token.toLowerCase());
+  });
+
+  // Use MIME Type
+  if (file.mimeType) {
+    const parts = file.mimeType.split('/');
+    parts.forEach(p => tags.add(p.toLowerCase()));
+  }
+
+  // Add keywords from properties if exist
+  if (file.properties) {
+    for (let key in file.properties) {
+      if (file.properties[key]) {
+        tags.add(file.properties[key].toLowerCase());
+      }
+    }
+  }
+
+  return Array.from(tags).filter(t => t.length > 0 && t.length <= 50);
+}
+
+// === FILE PREVIEW ===
+function generatePreviewFromFile(file) {
+  return `Created: ${file.createdTime}, Updated: ${file.modifiedTime}, MIME: ${file.mimeType}`;
+}
+
+// === RECURSIVE FOLDER/FILE ENUMERATION ===
+function listFoldersAndFilesRecursively(sharedDriveId, parentFolderId, accessToken, folders, files, pathMap = {}, currentPath = []) {
+  let pageToken = null;
+  do {
+    let url = 'https://www.googleapis.com/drive/v3/files'
+      + '?fields=files(id,name),nextPageToken'
+      + `&q='${parentFolderId ? parentFolderId : sharedDriveId}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'`
+      + `&supportsAllDrives=true&includeItemsFromAllDrives=true&driveId=${sharedDriveId}&corpora=drive`;
+    if (pageToken) url += '&pageToken=' + pageToken;
+
+    const response = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + accessToken } });
+    const data = JSON.parse(response.getContentText());
+
+    data.files.forEach(folder => {
+      const folderId = folder.id;
+      const newPath = currentPath.concat([folder.name]);
+      folders[folderId] = { id: folderId, name: folder.name, parent: parentFolderId, children: [] };
+      pathMap[folderId] = newPath;
+      listFoldersAndFilesRecursively(sharedDriveId, folderId, accessToken, folders, files, pathMap, newPath);
+
+      if (parentFolderId && folders[parentFolderId]) {
+        folders[parentFolderId].children.push(folderId);
+      }
+    });
+
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  // Process files
+  if (parentFolderId) {
+    let filePageToken = null;
+    do {
+      let fileUrl = 'https://www.googleapis.com/drive/v3/files'
+        + '?fields=files(id,name,mimeType,createdTime,modifiedTime,owners(displayName,emailAddress),properties),nextPageToken'
+        + `&q='${parentFolderId}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'`
+        + `&supportsAllDrives=true&includeItemsFromAllDrives=true&driveId=${sharedDriveId}&corpora=drive`;
+      if (filePageToken) fileUrl += '&pageToken=' + filePageToken;
+
+      const fileResponse = UrlFetchApp.fetch(fileUrl, { headers: { Authorization: 'Bearer ' + accessToken } });
+      const fileData = JSON.parse(fileResponse.getContentText());
+
+      if (!files[parentFolderId]) files[parentFolderId] = [];
+      fileData.files.forEach(file => {
+        file._folderPath = pathMap[parentFolderId] || [];
+        files[parentFolderId].push(file);
+      });
+
+      filePageToken = fileData.nextPageToken;
+    } while (filePageToken);
+  }
+}
