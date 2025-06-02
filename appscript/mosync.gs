@@ -1,13 +1,4 @@
 function syncAll() {
-  // === CONFIGURATION 
-GOOGLE_FOLDER_ID=your_folder_id
-NOTION_API_KEY=secret_notion_key
-NOTION_DATABASE_ID=your_database_id
-GOOGLE_CLIENT_ID=your_google_client_id
-GOOGLE_CLIENT_SECRET=your_google_client_secret
-GOOGLE_ACCESS_TOKEN=your_google_access_token
-GOOGLE_REFRESH_TOKEN=your_google_refresh_token
-===
   var GOOGLE_FOLDER_ID = GOOGLE_FOLDER_ID; 
   var NOTION_TOKEN = NOTION_API_KEY;  
   var NOTION_DATABASE_ID = NOTION_DATABASE_ID;   
